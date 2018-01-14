@@ -1,0 +1,251 @@
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(fig.align="center", fig.height=4, fig.width=5)
+#install.packages("tidyverse")
+library(ggplot2)
+theme_set(theme_bw(base_size=12))
+library(dplyr)
+library(tidyr)
+library(grid)
+#install.packages("car")
+library(car)
+```
+
+## Explanation of Data Set and Features
+
+Dataset: st-PreThresholdVectorizedStructure.mat
+
+Strand Features: 
+
+  `strand`: Strand Index Number
+  
+  `size`: Number of Vertices in Strand
+  
+  `minZ`: Minimum z position
+  
+  `maxZ`: Maximum z position
+  
+  `meanZ`: Mean z position
+  
+  `minX`: Minimum x position
+  
+  `maxX`: Maximum x position
+  
+  `meanX`: Mean x position
+  
+  `minY`: Minimum Y position
+  
+  `maxY`: Maximum Y position
+  
+  `meanY`: Mean Y position
+  
+  `meanRadius`: Mean radius of strand
+  
+  `stdRadius`: A measure of uniform radius for each strand
+  
+  `length`: Distance from endpoint to endpoint of strand
+  
+  `tangleFactor`: Size divided by length.  The larger the tangle factor, the more tortuous the vessel
+  
+  `strandBrightness`: Average intensity of pixels encompassed by each strand
+  
+  `Class`: Classification of each strand.  2 = uncategorized, 1 = good, 0 = bad
+
+```{r message=FALSE}
+# This R code chunk contains the calc_ROC function.
+calc_ROC <- function(probabilities, known_truth, model.name=NULL)
+  {
+  outcome <- as.numeric(factor(known_truth))-1
+  pos <- sum(outcome) # total known positives
+  neg <- sum(1-outcome) # total known negatives
+  pos_probs <- outcome*probabilities # probabilities for known positives
+  neg_probs <- (1-outcome)*probabilities # probabilities for known negatives
+  true_pos <- sapply(probabilities,
+                     function(x) sum(pos_probs>=x)/pos) # true pos. rate
+  false_pos <- sapply(probabilities,
+                     function(x) sum(neg_probs>=x)/neg)
+  if (is.null(model.name))
+    result <- data.frame(true_pos, false_pos)
+  else
+    result <- data.frame(true_pos, false_pos, model.name)
+  result %>% arrange(false_pos, true_pos)
+  }
+```
+
+## Create Data Set
+```{r message=FALSE}
+
+strandFeatures20170630 <- read.table("/Users/hobbes/Downloads/R_Users/strandFeatures.csv",sep=",",header=T)
+strandFeatures <- strandFeatures20170630 %>% filter(Good < 2) # limit data set to curated strands
+strandFeatures <- strandFeatures %>% filter(tangleFactor < 100) # remove strands that start and end in the same position
+sapply(strandFeatures, mode) # confirm that data features are the correct type i.e. numeric
+head(strandFeatures) # display a portion of strandFeatures dataframe
+
+```
+
+## Partition data into test and training fractions
+
+```{r message=FALSE}
+
+train_fraction <- 0.7 # fraction of data used for training
+set.seed(123) # set the seed to make the partition reproducible
+train_size <- floor(train_fraction * nrow(strandFeatures)) # number of observations in training set
+train_indices <- sample(1:nrow(strandFeatures), size = train_size) # define indices for training set
+train_data  <- strandFeatures[train_indices, ] # get training data
+test_data <- strandFeatures[-train_indices, ] # get test data
+
+```
+
+# Multicollinearity Analysis
+
+```{r message=FALSE}
+
+glm.out <- glm(Good ~ size + minZ + `maxZ` + `meanZ` + `minX` + `maxX` + `meanX` + `minY` + `maxY` + `meanY` + meanRadius + stdRadius + `length` + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+vif(glm.out)
+
+# remove collinear features
+glm.out <- glm(Good ~ size + meanZ + meanX + meanY + meanRadius + stdRadius + length + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+vif(glm.out)
+
+# remove collinear features
+glm.out <- glm(Good ~ size + meanZ + meanX + meanY + meanRadius + stdRadius + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+vif(glm.out)
+
+```
+
+## Backwards Feature Selection
+
+```{r message=FALSE}
+
+# GLM1: All non-collinear features included
+glm.out <- glm(Good ~ size + meanZ + meanX + meanY + meanRadius + stdRadius + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+summary(glm.out)
+
+# GLM2: Remove meanY
+glm.out <- glm(Good ~ size + meanZ + meanX + meanRadius + stdRadius + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+summary(glm.out)
+
+# GLM3: Remove meanY, meanX
+glm.out <- glm(Good ~ size + meanZ + meanRadius + stdRadius + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+summary(glm.out)
+
+# GLM4:Remove meanY, meanX, meanRadius
+glm.out <- glm(Good ~ size + meanZ + stdRadius + tangleFactor + strandBrightness, data = train_data, family = binomial)  
+summary(glm.out)
+
+```
+
+## Perform ROC AUC
+
+```{r message=FALSE}
+
+prob <- predict(glm.out, test_data, type="response") # predict probabilities on the test data set
+pred <- predict(glm.out, test_data) # predict the outcome on the test data set
+
+# Calculate ROC on the training data
+ROC.train <- calc_ROC(probabilities=glm.out$fitted.values, # predicted probabilities
+                 known_truth=train_data$Good,   # the known truth, i.e., Position
+                 model.name="Train Data")  # ROC curve for known data
+head(ROC.train) # display a portion of ROC.train results
+
+# Calculate ROC on the test data
+ROC.test <- calc_ROC(probabilities=prob, # predicted probabilities
+                 known_truth=test_data$Good,  # the known truth, i.e., true Position
+                 model.name="Test Data") # ROC curve for known data
+head(ROC.test) # display a portion of ROC.test results
+
+ROCs <- rbind(ROC.train, ROC.test) # combine ROC.train and ROC.test in a single data frame
+
+ROCs %>% group_by(model.name) %>% mutate(delta=false_pos-lag(false_pos)) %>% summarize(AUC=sum(delta*true_pos, na.rm=T)) %>% arrange(desc(AUC))  # group ROCs data frame by model name, calculate AUC values, and display the results in order of decreasing AUC
+
+ggplot(ROCs, aes(x=false_pos, y=true_pos, color=model.name)) + geom_line() # a plot with two ROC curves corresponding to the training and test data
+
+lr_data <- data.frame(predictor=pred, probability=prob, Strand = test_data$strand, Good=factor(test_data$Good)) # combine probabilities and predictors of position with true position in a single data frame
+
+goodStrands <- filter(lr_data, Good == "1") # extract good strand data
+badStrands <- filter(lr_data, Good == "0") # extract bad strand data
+
+ggplot(lr_data, aes(x=predictor, y=probability, color=Good)) + geom_point(alpha=0.25) + geom_rug(data=goodStrands,sides='b',alpha=0.25) + geom_rug(data=badStrands,sides='t',alpha=0.25)
+
+
+
+```
+
+
+## Analysis and Interpretation
+
+First, the strand features data-set was loaded into RStudio and uncuarated strands (`Class` = 2) were removed from the data set. Strands with a `tangleFactor` equal to infinity (i.e. strands that loop back to their original position) were filtered out as well, because the infinity values would prevent the general logistic model from being able to converge. Next, 70% of observations were partitioned into training data and the remaining 30% were designated as test data. I then fit a logistic regression model on the training data set using features chosen based on the absence of multicollinearity and backwards feature selection until only predictors with a significance level less than 0.05 and a variance inflation factor less than 10 remained.  I then used the model to predict the outcomes on the test data set and plotted the resulting ROC curves for both the training and test data sets. An ROC analysis is justifiable for the question at hand, because it directly informs us how successfully we are able to predict strand classifications within these two groups solely based on their geometric properties (e.g. position in 3D space) and the gray values of their corresponding image data.  
+
+Visual interpretation of the ROC curves show an initial, sharp increase in sensitivity (i.e. true positive rate) at low false positive rates, with additional modest gains in sensitivity at the cost of an increasing false positive rate. The individual ROC curves corresponding to the training and test sets generally appear to be very similar as expected due to the fact that they are random fractions of the same larger data set. The area under the curve provides a quantitative diagnostic summary of ROC analysis and informs us that the final predictors unsurprisingly provide a marginally better fit on the training dataset (~0.861) than on the test dataset (~0.834), but it is unlikely that this discrepancy is statistically significant. From the plot of fitted probability as a function of the linear predictor, colored by true classification, we see that most points are positioned towards the center of the logistic curve which suggests that the model cannot uniquely identify good vs bad strands with high confidence based on the predictors. Ideally, the two positions would be well separated by the linear predictor, however, we see a significant degree of overlap indicating that classification is imperfect.
+
+Ultimately, the ROC curves of the training and test datasets and their associated AUC values (~0.85) indicate that for the most part good and bad strands **do** possess unique characteristics that can be used as a basis for automatic differentiation. However, examining the plot of fitted probability versus predictors colored by classification reveals that there are plenty of instances where good strands were classified as bad strands and vice versa, suggesting that there are atypical instances which defy accurate categorization.
+
+## Applying What We've Learned
+
+```{r message=FALSE}
+assumeGood <- lr_data %>% filter(probability > 0.65) 
+assumeGood[, c(4)] <- sapply(assumeGood[, c(4)], as.numeric) # coerce classification values from factor levels to numeric values to enable accuracy calculation
+assumeGood[, c(4)] <- assumeGood[, c(4)] - 1 # change good/bad classification from 2/1 to 1/0
+assumeGood %>% summarize(Accuracy=mean(Good)) # accuracy of strands autocuration at given LR probabilty 
+
+nrow(lr_data) # num strands in test data set
+nrow(assumeGood) # num strands autocurated
+worksaved = (nrow(assumeGood)/nrow(lr_data))*100  # percentage of data autocurated
+worksaved
+
+``` 
+
+The core idea is to select a logistic regression probability threshold and calculate the corresponding accuracy of auto-classification for that given threshold. In the above example, I've chosen a 0.65 logistic regression probability assignment, which yields an 85% accuracy level, and we find that 34.35% of the strands fit this criteria.  This means, we'd still have to manually curate the remaining ~65% of the strands to maintain a minimum 85% accuracy level.  Assuming that manual curation is 100% accurate, our overall accuracy will be (0.3435x0.85) + (0.6565x1) = 0.9485.
+
+
+
+```{r message=FALSE}
+iterations = 21
+variables = 7
+
+output <- matrix(ncol=variables, nrow=iterations)
+row = 1
+for(i in seq(0, 1, 0.05)){
+  assumeGood <- lr_data %>% filter(probability > i)
+  
+  if(nrow(assumeGood)>0){
+    assumeGood[, c(4)] <- sapply(assumeGood[, c(4)], as.numeric) # coerce classification values from factor levels to numeric values to enable accuracy calculation 
+    assumeGood[, c(4)] <- assumeGood[, c(4)] - 1 # change good/bad classification from 2/1 to 1/0
+    autoAccuracy <- mean(assumeGood$Good) # calculate classification accuracy of autocurated set
+  } else {
+    autoAccuracy <- 0
+  }
+  
+  output[row,c(1)] <- i # logistic regression probability threshold for inclusion in autocurated set
+  output[row,c(2)] <- nrow(assumeGood) # number of strands automatically curated at a given lr probability threshold
+  output[row,c(3)] <- autoAccuracy # classification accuracy of autocurated set
+  output[row,c(4)] <- nrow(lr_data) - nrow(assumeGood) # number of strands that will need to be manually curated at a given LR Probability Threshold
+  output[row,c(5)] <- 1 # classification accuracy of manually curated set
+  output[row,c(6)] <- nrow(assumeGood)/nrow(lr_data) # fraction of strands that are autocurated at given LR prob threshold
+  output[row,c(7)] <- (nrow(assumeGood)/nrow(lr_data))*autoAccuracy + (1-(nrow(assumeGood)/nrow(lr_data)))*1
+  row = row + 1 # overall classification accuracy (auto- and manually curated)
+}
+output <- data.frame(output)
+col_headings <- c('LR Prob Thresh','# Auto','Auto Acc', '# Manual', 'Manual Acc', 'Fraction Autocurated','Overall Acc')
+names(output) <- col_headings
+
+print(output) # display table of expected classification accuracy for each lr probability threshold
+
+ggplot(output, aes(x=`Fraction Autocurated`, y=`Overall Acc`)) + geom_point(aes(color = `LR Prob Thresh` )) + geom_line(alpha=0.25) + xlab("Fraction Autocurated") +  ylab("Overall Classification Accuracy")
+
+```
+
+The above plot illustrates that if we manually curate all strands we obtain a 100% classification accuracy, but as we lower the logistic regression probability threshold we accept a greater fraction of strands for autocuration and the overall classification accuracy decreases.
+
+```{r message=FALSE}
+#install.packages("fastAdaboost")
+#library(fastAdaboost)
+
+test_data$Good = factor(test_data$Good)
+test_adaboost <- adaboost(Good ~ size + meanZ + stdRadius + tangleFactor + strandBrightness, data = test_data,10)  
+pred <- predict( test_adaboost,newdata=test_data)
+print(pred$error)
+tree <- get_tree(test_adaboost,5)
+print( table(pred$class,test_data$Good))
+
+```
